@@ -1,0 +1,16 @@
+data/raw/
+data/frames/
+data/cache/
+data/processed/
+__pycache__/
+*.pyc
+.claude/
+logs/
+model/
+model-4b/
+model-embedding/
+*.pt
+*.safetensors
+checkpoints/
+venv/
+.venv/
