@@ -72,6 +72,7 @@ def main():
         processor=model.processor,
         normalizer=normalizer,
         history_frames=data_cfg["history_frames"],
+        action_horizon=data_cfg["action_horizon"],
         image_size=tuple(data_cfg["image_size"]),
         split="val",
         train_ratio=data_cfg["train_split"],
@@ -96,13 +97,14 @@ def main():
         with torch.no_grad():
             outputs = model(**batch)
 
-        pred = outputs["action_pred"].cpu().numpy()
-        label = labels.cpu().numpy()
-        all_preds.append(pred[0])
-        all_labels.append(label[0])
+        pred = outputs["action_pred"].cpu().numpy()  # (1, 10, 7)
+        label = labels.cpu().numpy()                  # (1, 70)
+        # Only evaluate first step of the chunk (receding horizon)
+        all_preds.append(pred[0, 0])
+        all_labels.append(label[0, :7])
 
-    all_preds = np.array(all_preds)
-    all_labels = np.array(all_labels)
+    all_preds = np.array(all_preds)   # (N, 7)
+    all_labels = np.array(all_labels)  # (N, 7)
 
     metrics = compute_metrics(all_preds, all_labels, normalizer)
 

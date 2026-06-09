@@ -14,11 +14,11 @@ model:
   bnb_4bit_use_double_quant: true
 
 data:
-  dataset_name: "X-Humanoid/RoboMIND2.0-Franka"  # RoboMIND 2.0 Franka (ModelScope)
+  dataset_name: "lerobot/bridge_dataset"
   data_dir: "./data"
   history_frames: 4
   action_dim: 7
-  action_horizon: 1
+  action_horizon: 10
   image_size: [224, 224]
   normalize_actions: true
   train_split: 0.9
@@ -40,3 +40,4 @@ training:
   logging_steps: 10
   dataloader_num_workers: 4
   seed: 42
+  temporal_smooth_weight: 0.01
