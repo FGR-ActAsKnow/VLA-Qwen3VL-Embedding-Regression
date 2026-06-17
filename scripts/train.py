@@ -28,8 +28,12 @@ def main():
         config["model"]["name"] = str(local_model.resolve())
         print(f"Using local model: {config['model']['name']}")
 
-    model = Qwen3VLRobotPolicy(config)
-    print(f"Model loaded. Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    if args.resume:
+        model = Qwen3VLRobotPolicy.from_pretrained(args.resume, config)
+        print(f"Resumed from {args.resume}. Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    else:
+        model = Qwen3VLRobotPolicy(config)
+        print(f"Model loaded. Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     normalizer = ActionNormalizer()
     if args.normalizer:
@@ -37,6 +41,7 @@ def main():
         print(f"Loaded normalizer from {args.normalizer}")
 
     data_cfg = config["data"]
+    train_cfg = config["training"]
     train_dataset = RobotActionDataset(
         metadata_path=args.metadata,
         processor=model.processor,
@@ -46,6 +51,7 @@ def main():
         image_size=tuple(data_cfg["image_size"]),
         split="train",
         train_ratio=data_cfg["train_split"],
+        gaussian_noise=train_cfg.get("gaussian_noise", 0.0),
     )
 
     normalizer.save(str(Path(config["training"]["output_dir"]) / "normalizer.json"))
@@ -64,7 +70,7 @@ def main():
 
     print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
-    trainer = Trainer(model, config)
+    trainer = Trainer(model, config, resume_from=args.resume)
     trainer.train(train_dataset, val_dataset)
 
 

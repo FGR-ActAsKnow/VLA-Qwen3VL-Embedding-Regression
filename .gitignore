@@ -14,3 +14,5 @@ model-embedding/
 checkpoints/
 venv/
 .venv/
+.model_temp/
+*.bag
