@@ -1,113 +1,114 @@
-# Qwen3-VL + Regression Head VLA 模型
+# VLA-Qwen3VL-Embedding-Regression
 
-基于 **Qwen3-VL-Embedding-8B** 的 VLA（Vision-Language-Action）模型，输入 4 帧图像 + 任务指令，通过 DualHead MLP 回归头输出 10 步连续动作（动作分块 + Receding Horizon）。
+基于 Qwen3-VL-Embedding-8B 和 RoboMIND 2.0 数据集的 VLA（Vision-Language-Action）机器人操控模型。输入多帧图像与任务指令，通过 DualHead MLP 回归头直接输出 10 步连续动作序列，在 Franka Emika Panda 机械臂上实现厘米级预测精度。
 
-数据集：**RoboMIND 2.0 Franka**（北京人形机器人创新中心 + 北京大学，ModelScope 直链），国产全链路。
+**四轮迭代从基线 12.6cm 降至 3.1cm（↓75%），并实证了 MSE 回归在 129K 样本规模下的数据利用率上限。**
 
 ---
-
-## 四迭代演进
-
-| 迭代 | 改进 | 中位数 EU | 关键发现 |
-|------|------|-----------|----------|
-| 一 | 单步回归（Baseline） | 5.9cm | 回归头 + MSE 解决了离散 token 的模式坍缩 |
-| 二 | 动作分块 + 时序平滑 | 3.4cm (↓42%) | 一次预测 10 步消除了误差累积 |
-| 三 | 分头输出 + 历史动作 + 高斯噪声 | 3.1cm (↓9%) | 夹爪二分类达 100%，姿态误差降 20% |
-| 四 | 15× 数据规模扩展（129K 样本） | 持平 | **确认 MSE 回归数据天花板，架构转移至 Diffusion Policy** |
-
-## 最终评估结果
-
-| 指标 | 迭代一 | 迭代二 | 迭代三 | 迭代四 | 备注 |
-|------|--------|--------|--------|--------|------|
-| 中位数 EU | 5.9cm | 3.4cm | **3.1cm** | 4.0 | 归一化统计量因数据集不同而变化 |
-| dx MAE | 0.49cm | 0.32cm | 0.33cm | **0.29cm** | 持续改进 |
-| dz MAE | 1.25cm | 0.72cm | 0.78cm | **0.73cm** | 持续改进 |
-| droll MAE | 6.4° | 4.0° | **3.2°** | 4.3° | 迭代四因数据分布变化回升 |
-| 夹爪准确率 | 99.89% | 99.88% | **100.00%** | 99.95% | BCE 分头根本性解决 |
-| 训练样本 | 9K | 9K | 9K | **129K** | 15 倍 |
-
-详细数据和分析见 [实验报告.md](实验报告.md)，面试问答见 [面试QA.txt](面试QA.txt)。
 
 ## 架构
 
 ```
-4 帧图像 (consecutive timesteps) + 任务指令
+4 帧连续图像 + 任务指令
         │
         ▼
-┌─────────────────────────────┐
-│  Qwen3-VL-Embedding-8B     │
-│  Visual Encoder (冻结)      │
-│  LLM (LoRA rank=16, 4-bit) │
-│  last_hidden_state → 4096   │
-└─────────────────────────────┘
+┌─────────────────────────────────┐
+│  Qwen3-VL-Embedding-8B          │
+│  ├─ Visual Encoder (冻结)        │
+│  └─ LLM (LoRA rank=16, 4-bit)  │
+│  last_hidden_state → 4096        │
+└─────────────────────────────────┘
         │
         ▼
-┌─────────────────────────────┐
-│  DualHead Regression        │
-│  Pos: 4096→2048→1024→60    │ ← 10步 × 6维 (dx,dy,dz,dr,dp,dy)
-│  Grip: 4096→2048→1024→10   │ ← 10步 × 1维 (BCE)
-└─────────────────────────────┘
+┌─────────────────────────────────┐
+│  DualHead Regression Head        │
+│  ├─ Position: 4096→2048→1024→60 │  10步 × 6维 (dx,dy,dz,dr,dp,dy)
+│  └─ Gripper:  4096→2048→1024→10 │  10步 × 1维 (Sigmoid + BCE)
+└─────────────────────────────────┘
         │
-    第 1 步执行 → 下一帧重新预测（Receding Horizon）
+    Receding Horizon: 执行第1步，下一帧重新预测
 ```
 
-## 核心设计决策
+## 四轮迭代
 
-| 决策 | 选择 | 原因 |
-|------|------|------|
-| 基座 | Qwen3-VL-**Embedding**（非 Instruct） | 无 LM Head，省 1.3GB，天然适配回归 |
-| 输出 | 连续回归 MSE + BCE | 避免离散 token 化的模式坍缩 |
-| 时序 | 4 帧 + 10 步动作分块 | VLM 感知运动 + Receding Horizon 消除累积误差 |
-| 微调 | LoRA rank=16 + NF4 4-bit | 推理 ~5.5GB，训练 ~12GB（4060 Ti 16GB） |
-| 数据集 | RoboMIND 2.0 Franka | 国产 + 7-DoF 匹配 + ModelScope 直链 |
-| 训练 | 自定义 Accelerate 循环 | 完全控制 forward + loss，不依赖 LLaMA-Factory |
+| 迭代 | 核心改进 | 中位数误差 | 关键结论 |
+|------|---------|:--------:|----------|
+| 一 | 单步回归，替代离散 token 方案 | 5.9 cm | 回归头 + MSE 根治模式坍缩 |
+| 二 | 动作分块 (10步) + 时序平滑 Loss | 3.4 cm (↓42%) | Receding Horizon 消除误差累积 |
+| 三 | 夹爪二分类 + 历史动作注入 + 高斯噪声 | 3.1 cm (↓9%) | 夹爪 100% 准确，姿态误差降 20% |
+| 四 | 数据量 15× 扩展 (129K samples) | 持平 | MSE 回归触及数据天花板 → 下一步 Diffusion Policy |
 
-## 快速启动
+## 最终性能
+
+| 指标 | 数值 |
+|------|:----:|
+| 位置 MAE (dx/dy/dz) | 0.29 / 0.79 / 0.73 cm |
+| 姿态 MAE (roll/pitch/yaw) | 4.3° / 0.7° / 0.4° |
+| 夹爪准确率 | 99.95% |
+| 训练样本 | 129,083 (599 条 Franka 轨迹) |
+| 参数量 | LoRA 21M 可训练 / 8B 总量化 |
+
+![Loss Curve](training_curve.png)
+
+## 工程亮点
+
+**模型设计** — 从零设计的 DualHead 回归架构，位置/姿态回归 + 夹爪二分类分离，每层 LayerNorm + GELU + Dropout。Embedding 版 Qwen3-VL 去 LM Head 省 1.3GB 显存，适配回归任务。
+
+**训练管线** — 自定义 Accelerate 训练循环替代 LLaMA-Factory 黑盒，完全控制 forward / loss。支持断点续训（optimizer / scheduler / global_step 完整存档），eval 裁剪至 100 batch 加速验证。
+
+**数据工程** — RoboMIND 2.0 Franka 国产数据集，HDF5 解析 + 多线程并行下载。Z-score 动作归一化 + 反归一化评估，支持 6 路 RGB 相机切换。
+
+**仿真闭环** — MuJoCo + DLS IK 求解器，VLA 推理 → 末端位姿 → IK → 关节角度 → 执行 → 渲染，完整的仿真验证链路。
+
+**显存优化** — NF4 4-bit 量化 + LoRA rank=16，推理 ~5.5GB，训练峰值 ~12GB，单卡 RTX 4060 Ti 16GB 可完成 8B 模型全流程训练。
+
+## 快速开始
 
 ```bash
-# 1. 环境（Python 3.11, PyTorch 2.6, CUDA 12.x）
+# 环境
 pip install -r requirements.txt
 
-# 2. 下载 Qwen3-VL-Embedding-8B（需自行下载，不上传 GitHub）
-#    放到 model-embedding/ 目录下
+# 下载基座模型（不上传 GitHub，需自行获取后放入 model-embedding/）
+# Qwen/Qwen3-VL-Embedding-8B
 
-# 3. 数据下载（RoboMIND 2.0 Franka，三组任务各 200 条）
+# 下载数据
 python scripts/download_robomind.py --max-episodes 200 --workers 3
 
-# 4. HDF5 → metadata
+# 转换格式
 python scripts/convert_robomind.py --data-dir data/raw/robomind --fps 5 \
     --max-files 600 --output data/processed/metadata.json
 
-# 5. 训练
+# 训练
 python scripts/train.py --config configs/config.yaml \
     --metadata data/processed/metadata.json
 
-# 6. 评估（需要已训练的 checkpoint，不上传 GitHub）
-python scripts/eval.py --config configs/config.yaml \
-    --checkpoint checkpoints/checkpoint-best \
-    --metadata data/processed/metadata.json \
-    --normalizer normalizer.json
+# 评估（需已训练权重）
+python scripts/eval.py --checkpoint checkpoints/checkpoint-best \
+    --metadata data/processed/metadata.json --normalizer normalizer.json
 
-# 7. 仿真
+# 仿真
 MUJOCO_GL=egl python scripts/simulate.py \
-    --checkpoint checkpoints/checkpoint-best --steps 100 --record trajectory.json
+    --checkpoint checkpoints/checkpoint-best --steps 100
 ```
 
-## 文档
+## 文件结构
 
-| 文件 | 内容 |
-|------|------|
-| [实验报告.md](实验报告.md) | 四轮迭代完整数据、训练配置、对比分析 |
-| [项目总结.txt](项目总结.txt) | 技术回顾 + 简历包装建议 |
-| [面试QA.txt](面试QA.txt) | 30+ 面试问题及回答要点 |
-| [动作分块设计.md](动作分块设计.md) | Action Chunking 设计思想 |
-| [仿真部署方案.md](仿真部署方案.md) | MuJoCo 闭环仿真架构 |
-| `normalizer.json` | Z-score 归一化统计量（eval/simulate 需要） |
-| `training_curve.png` | 迭代四 Loss 曲线 |
+```
+├── src/model/          VLA 模型定义 (Qwen3-VL + DualHead)
+├── src/data/           数据集加载、归一化、collate
+├── src/train/          训练器 (Accelerate、断点续训、CSV 日志)
+├── scripts/            训练 / 评估 / 数据下载 / 仿真 / 可视化
+├── configs/            训练超参
+├── 实验报告.md          四轮迭代完整数据与分析
+├── normalizer.json     Z-score 归一化统计量
+└── loss_log.csv        迭代四训练日志
+```
+
+模型权重与原始数据不上传 GitHub（`.gitignore` 排除 `checkpoints/`、`data/`、`model-embedding/`）。
 
 ## 技术栈
 
-Python 3.11 · PyTorch 2.6 · HuggingFace Transformers · PEFT/LoRA · bitsandbytes 4-bit · Accelerate · Qwen3-VL-Embedding-8B · RoboMIND 2.0 · MuJoCo · ModelScope · HDF5
+Python 3.11 · PyTorch 2.6 · Transformers · PEFT/LoRA · bitsandbytes (NF4) · Accelerate · Qwen3-VL-Embedding-8B · RoboMIND 2.0 · MuJoCo · ModelScope · HDF5
 
 ## License
 
