@@ -11,6 +11,14 @@ from transformers import Qwen3VLProcessor
 from .processing import ActionNormalizer
 
 
+ACTION_NAMES = ["dx", "dy", "dz", "droll", "dpitch", "dyaw", "gripper"]
+
+
+def format_prev_action(action: np.ndarray) -> str:
+    parts = [f"{n}={v:.4f}" for n, v in zip(ACTION_NAMES, action)]
+    return "Previous action: " + ", ".join(parts) + "."
+
+
 class RobotActionDataset(Dataset):
     def __init__(
         self,
@@ -18,18 +26,23 @@ class RobotActionDataset(Dataset):
         processor: Qwen3VLProcessor,
         normalizer: ActionNormalizer | None = None,
         history_frames: int = 4,
+        action_horizon: int = 10,
         image_size: tuple[int, int] = (224, 224),
-        instruction: str = "Predict the next robot action as 7 continuous values: dx, dy, dz, droll, dpitch, dyaw, gripper.",
+        instruction: str = "Based on the image sequence and previous action, predict the next robot actions.",
         split: str = "train",
         train_ratio: float = 0.9,
         seed: int = 42,
         max_samples: int | None = None,
+        gaussian_noise: float = 0.0,
     ):
         self.processor = processor
         self.normalizer = normalizer
         self.history_frames = history_frames
+        self.action_horizon = action_horizon
         self.image_size = image_size
         self.instruction = instruction
+        self.gaussian_noise = gaussian_noise
+        self.is_train = (split == "train")
 
         with open(metadata_path) as f:
             samples = json.load(f)
@@ -44,9 +57,9 @@ class RobotActionDataset(Dataset):
         self.windows = []
         for ep_id, frames in episodes.items():
             n = len(frames)
-            if n >= history_frames + 1:
-                for i in range(history_frames, n):
-                    window = frames[i - history_frames : i + 1]
+            if n >= history_frames + action_horizon:
+                for i in range(history_frames, n - action_horizon + 1):
+                    window = frames[i - history_frames : i + action_horizon]
                     self.windows.append(window)
 
         random.seed(seed)
@@ -74,20 +87,47 @@ class RobotActionDataset(Dataset):
 
     def __getitem__(self, idx: int):
         window = self.windows[idx]
-        images = [self._load_image(f["image_path"]) for f in window]
-        action_raw = np.array(window[-1]["action"], dtype=np.float32)
+        images = [self._load_image(f["image_path"]) for f in window[:self.history_frames]]
 
+        # Previous action (frame just before targets), denormalized
+        prev_frame = window[self.history_frames - 1]
+        prev_raw = np.array(prev_frame["action"], dtype=np.float32)
         if self.normalizer is not None and self.normalizer.mean is not None:
-            action = self.normalizer.normalize(action_raw)
+            prev_action_norm = self.normalizer.normalize(prev_raw)
         else:
-            action = action_raw
+            prev_action_norm = prev_raw
+
+        # Target actions (action_horizon frames)
+        pos_parts = []  # first 6 dims
+        grip_parts = []  # 7th dim as binary
+        for i in range(self.action_horizon):
+            act_raw = np.array(window[self.history_frames + i]["action"], dtype=np.float32)
+            if self.normalizer is not None and self.normalizer.mean is not None:
+                act_norm = self.normalizer.normalize(act_raw)
+            else:
+                act_norm = act_raw.copy()
+
+            # Gaussian noise on training data
+            if self.is_train and self.gaussian_noise > 0:
+                act_norm[:6] += np.random.normal(0, self.gaussian_noise, 6)
+
+            pos_parts.append(torch.tensor(act_norm[:6], dtype=torch.float32))
+            grip_parts.append(torch.tensor([1.0 if act_raw[6] > 0.5 else 0.0], dtype=torch.float32))
+
+        pos_labels = torch.cat(pos_parts)   # (action_horizon * 6)
+        grip_labels = torch.cat(grip_parts)  # (action_horizon * 1)
+
+        # Format previous action as text for instruction
+        prev_text = format_prev_action(prev_raw)
 
         return {
             "images": images,
-            "action_raw": torch.tensor(action_raw, dtype=torch.float32),
-            "action": torch.tensor(action, dtype=torch.float32),
-            "episode_id": window[-1]["episode_id"],
-            "frame_idx": window[-1]["frame_idx"],
+            "pos_labels": pos_labels,
+            "grip_labels": grip_labels,
+            "prev_text": prev_text,
+            "prev_action": torch.tensor(prev_action_norm, dtype=torch.float32),
+            "episode_id": window[self.history_frames]["episode_id"],
+            "frame_idx": window[self.history_frames]["frame_idx"],
         }
 
 
@@ -100,12 +140,14 @@ def collate_fn(batch: list[dict], processor: Qwen3VLProcessor, instruction: str)
 
     for sample in batch:
         images = sample["images"]
+        prev_text = sample.get("prev_text", "")
+        full_inst = f"{prev_text}\n{instruction}"
 
         messages = [{
             "role": "user",
             "content": [
                 *(dict(type="image", image=img) for img in images),
-                dict(type="text", text=instruction),
+                dict(type="text", text=full_inst),
             ],
         }]
 
@@ -132,7 +174,8 @@ def collate_fn(batch: list[dict], processor: Qwen3VLProcessor, instruction: str)
 
     pixel_values = torch.cat(all_pixel_values, dim=0)
     image_grid_thw = torch.cat(all_image_grid_thw, dim=0)
-    actions = torch.stack([s["action"] for s in batch])
+    pos_labels = torch.stack([s["pos_labels"] for s in batch])
+    grip_labels = torch.stack([s["grip_labels"] for s in batch])
 
     return {
         "input_ids": input_ids,
@@ -140,5 +183,6 @@ def collate_fn(batch: list[dict], processor: Qwen3VLProcessor, instruction: str)
         "mm_token_type_ids": mm_token_type_ids,
         "pixel_values": pixel_values,
         "image_grid_thw": image_grid_thw,
-        "action_labels": actions,
+        "pos_labels": pos_labels,
+        "grip_labels": grip_labels,
     }

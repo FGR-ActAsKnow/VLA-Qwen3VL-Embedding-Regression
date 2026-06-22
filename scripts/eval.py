@@ -10,32 +10,40 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.model.qwen3vl_robot import Qwen3VLRobotPolicy
-from src.data.dataset import RobotActionDataset, collate_fn
+from src.data.dataset import RobotActionDataset, collate_fn, ACTION_NAMES
 from src.data.processing import ActionNormalizer
 from torch.utils.data import DataLoader
 
+DIM_NAMES = ["dx", "dy", "dz", "droll", "dpitch", "dyaw"]
 
-def compute_metrics(pred: np.ndarray, gt: np.ndarray, normalizer: ActionNormalizer) -> dict:
-    pred_denorm = normalizer.denormalize(pred)
-    gt_denorm = normalizer.denormalize(gt)
 
-    euclidean_dist = np.sqrt(np.sum((pred_denorm - gt_denorm) ** 2, axis=-1))
-    dim_errors = np.abs(pred_denorm - gt_denorm)
+def compute_metrics(pos_pred: np.ndarray, pos_gt: np.ndarray,
+                    grip_pred: np.ndarray, grip_gt: np.ndarray,
+                    normalizer: ActionNormalizer) -> dict:
+    """Compute metrics with pos and grip split."""
+    # Denormalize only position dims
+    pred_full = np.concatenate([pos_pred, grip_pred[:, None]], axis=-1)
+    gt_full = np.concatenate([pos_gt, grip_gt[:, None]], axis=-1)
+    pred_denorm = normalizer.denormalize(pred_full)
+    gt_denorm = normalizer.denormalize(gt_full)
 
-    action_dim = pred.shape[-1]
-    dim_names = ["dx", "dy", "dz", "droll", "dpitch", "dyaw", "gripper"]
+    pos_denorm = pred_denorm[:, :6]
+    pos_gt_denorm = gt_denorm[:, :6]
+
+    euclidean_dist = np.sqrt(np.sum((pos_denorm - pos_gt_denorm) ** 2, axis=-1))
+    dim_errors = np.abs(pos_denorm - pos_gt_denorm)
 
     metrics = {
         "mean_euclidean_error": float(np.mean(euclidean_dist)),
         "median_euclidean_error": float(np.median(euclidean_dist)),
     }
-    for i in range(min(action_dim, len(dim_names))):
-        metrics[f"mae_{dim_names[i]}"] = float(np.mean(dim_errors[:, i]))
+    for i, name in enumerate(DIM_NAMES):
+        metrics[f"mae_{name}"] = float(np.mean(dim_errors[:, i]))
 
-    if action_dim >= 7:
-        gripper_pred = (pred_denorm[:, 6] > 0.5).astype(np.float32)
-        gripper_gt = (gt_denorm[:, 6] > 0.5).astype(np.float32)
-        metrics["gripper_accuracy"] = float(np.mean(gripper_pred == gripper_gt))
+    # Gripper accuracy (binary classification)
+    grip_pred_bin = (torch.sigmoid(torch.tensor(grip_pred)) > 0.5).numpy()
+    grip_acc = float(np.mean(grip_pred_bin == grip_gt))
+    metrics["gripper_accuracy"] = grip_acc
 
     return metrics
 
@@ -86,34 +94,43 @@ def main():
         collate_fn=lambda batch: collate_fn(batch, model.processor, dataset.instruction),
     )
 
-    all_preds = []
-    all_labels = []
+    all_pos_pred = []
+    all_pos_gt = []
+    all_grip_pred = []
+    all_grip_gt = []
 
     print(f"Evaluating {len(dataset)} samples...")
     for batch in tqdm(loader):
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-        labels = batch.pop("action_labels")
+        pos_labels = batch.pop("pos_labels")
+        grip_labels = batch.pop("grip_labels")
 
         with torch.no_grad():
             outputs = model(**batch)
 
-        pred = outputs["action_pred"].cpu().numpy()  # (1, 10, 7)
-        label = labels.cpu().numpy()                  # (1, 70)
-        # Only evaluate first step of the chunk (receding horizon)
-        all_preds.append(pred[0, 0])
-        all_labels.append(label[0, :7])
+        pos = outputs["pos_pred"][0, 0].cpu().numpy()    # (6,)
+        grip = outputs["grip_logits"][0, 0].cpu().numpy()  # (1,)
+        pgt = pos_labels[0, :6].cpu().numpy()             # (6,)
+        ggt = grip_labels[0, 0].cpu().numpy()              # (1,)
 
-    all_preds = np.array(all_preds)   # (N, 7)
-    all_labels = np.array(all_labels)  # (N, 7)
+        all_pos_pred.append(pos)
+        all_pos_gt.append(pgt)
+        all_grip_pred.append(grip.item())
+        all_grip_gt.append(ggt.item())
 
-    metrics = compute_metrics(all_preds, all_labels, normalizer)
+    all_pos_pred = np.array(all_pos_pred)
+    all_pos_gt = np.array(all_pos_gt)
+    all_grip_pred = np.array(all_grip_pred)
+    all_grip_gt = np.array(all_grip_gt)
+
+    metrics = compute_metrics(all_pos_pred, all_pos_gt, all_grip_pred, all_grip_gt, normalizer)
 
     print("\n=== Evaluation Results ===")
-    print(f"Samples: {len(all_preds)}")
+    print(f"Samples: {len(all_pos_pred)}")
     print(f"Mean Euclidean Error: {metrics['mean_euclidean_error']:.4f}")
     print(f"Median Euclidean Error: {metrics['median_euclidean_error']:.4f}")
     print("Per-dimension MAE:")
-    for dim in ["dx", "dy", "dz", "droll", "dpitch", "dyaw"]:
+    for dim in DIM_NAMES:
         key = f"mae_{dim}"
         if key in metrics:
             print(f"  {dim}: {metrics[key]:.4f}")
