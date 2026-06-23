@@ -62,12 +62,16 @@ VLM_Robotics/
 │   ├── eval.py                # BC 离线评估
 │   ├── simulate.py            # MuJoCo 闭环仿真（BC 推理）
 │   ├── visualize.py           # 预测 vs GT 动作可视化
-│   ├── train_ppo.py           # RL PPO 训练入口（SB3）
-│   ├── eval_ppo.py            # RL 策略评估
-│   └── collect_vla_demos.py   # VLA 演示数据采集
+│   ├── train_ppo.py           # RL PPO 训练（SB3）
+│   ├── eval_ppo.py            # RL 评估 + GIF 录制
+│   ├── collect_vla_demos.py   # VLA 蒸馏数据采集
+│   ├── pretrain_bc.py         # BC 蒸馏预训练
+│   ├── plot_rl_eval.py        # RL 评估报告图
+│   └── plot_bc_rl_curve.py    # BC→RL 微调曲线
 ├── configs/                   # 训练配置文件
 ├── checkpoints/               # BC 模型检查点
-├── rl_logs/                   # RL 模型与日志
+├── rl_logs/                   # RL 模型与评估数据
+├── viz/                       # 可视化（GIF + 轨迹图）
 ├── 内部资料/                   # 技术文档与实验报告
 └── README.md
 ```
@@ -204,15 +208,15 @@ python scripts/pretrain_bc.py --data data/vla_demos.npz --output rl_logs/bc_pret
 # Step 3: PPO 微调（~5min）
 python scripts/train_ppo.py --task reach --bc-pretrain rl_logs/bc_pretrained.zip --timesteps 200000
 
-# Step 4: 评估
-python scripts/eval_ppo.py --task reach --model rl_logs/ppo_reach/best_model.zip --episodes 30
+# Step 4: 评估 + 录制轨迹 GIF
+MUJOCO_GL=egl python scripts/eval_ppo.py --task reach --model rl_logs/ppo_reach/best_model.zip --episodes 30 --record viz/rl_trajectory.gif
 ```
 
 ### 3. 结果
 
 | 指标 | BC 蒸馏后（初始策略） | BC → RL 微调后 |
 |------|:---:|:---:|
-| 平均最优距离 | VLA 离线中位误差 3.1 cm | **MuJoCo 在线 0.20 m** |
+| 平均最优距离 | VLA 离线中位误差 3.1 cm | **MuJoCo 在线 0.13 m** |
 | 训练时间 | 37 小时（BC 四轮） | + 蒸馏 4h + PPO 5min |
 | 知识来源 | 12 万条专家轨迹 | VLA 蒸馏 + 在线探索 |
 | 管道状态 | ✅ 全链路跑通 | ✅ VLA → 蒸馏 → PPO 微调闭环 |
@@ -257,7 +261,7 @@ BC 模型作为基础，RL 在蒸馏后的策略上做微调：
 
 ### 1. 不要重复造轮子
 
-在 RL 实现中，先手写了完整的 PPO（GAE、advantage 归一化、PPO clip、value clipping、KL 早停），历时约一个月，反复修复 9 个 bug，仍不稳定。切换到 Stable-Baselines3 后，60 行代码 5 分钟跑通。
+在 RL 微调实现中，经历了从手写 PPO 到 Stable-Baselines3 的方案切换。手写版本（500+ 行代码）在 MuJoCo 物理仿真兼容性、Critic 初始化和设备管理上反复修复 9 个 bug 仍不稳定。切换到 SB3（60 行代码，加载蒸馏权重做微调）后训练全程稳定。
 
 **教训**：基础设施类组件（RL 算法、环境接口、日志）一律用成熟开源库。只有核心创新点（如 VLA 的 DualHead 回归头）才手写。
 
