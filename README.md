@@ -186,6 +186,8 @@ MUJOCO_GL=egl python scripts/simulate.py \
 
 > 详细实验报告见 `docs/实验报告.md`
 
+![BC 训练 Loss 曲线](training_curve.png)
+
 ---
 
 ## 路线二：强化学习微调（BC → RL）
@@ -230,6 +232,8 @@ MUJOCO_GL=egl python scripts/eval_ppo.py --task reach --model rl_logs/ppo_reach/
 | 训练时间 | 37 小时（BC 四轮） | + 蒸馏 4h + PPO 5min |
 | 知识来源 | 12 万条专家轨迹 | VLA 蒸馏 + 在线探索 |
 | 管道状态 | ✅ 全链路跑通 | ✅ VLA → 蒸馏 → PPO 微调闭环 |
+
+![BC→RL 微调训练曲线](rl_training_curve_bc_rl.png)
 
 ### 4. 管线意义
 
