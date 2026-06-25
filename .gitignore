@@ -16,3 +16,5 @@ venv/
 .venv/
 .model_temp/
 *.bag
+*.log
+*.tmp
